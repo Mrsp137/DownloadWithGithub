@@ -28,8 +28,8 @@ concurrency:
 
 env:
   # حتماً با مقادیر خودت عوض کن:
-  REPO_OWNER: "YOUR_GITHUB_USERNAME_OR_ORG"
-  REPO_NAME: "YOUR_REPO_NAME"
+  REPO_OWNER: "Mrsp137"
+  REPO_NAME: "DownloadWithGithub"
   DEFAULT_BRANCH: "main"
 
 jobs:
