@@ -146,6 +146,34 @@ jobs:
             exit 1
           fi
 
+      
+      - name: 📃 ساخت لیست پارت‌ها برای ربات
+        id: parts
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=( "${{ env.OUT_PATH }}"* )
+          shopt -u nullglob
+
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "❌ هیچ فایلی برای ارسال پیدا نشد."
+            exit 1
+          fi
+
+          # ساخت JSON آرایه‌ای از مسیر فایل‌ها
+          json="["
+          for f in "${files[@]}"; do
+            esc=$(printf '%s' "$f" | sed 's/\\/\\\\/g; s/"/\\"/g')
+            json="$json\"$esc\","
+          done
+          json="${json%,}]"
+
+          echo "parts_json=$json" >> "$GITHUB_OUTPUT"
+          echo "✅ parts_json ساخته شد: $json"
+
+
+          
           echo "✅ فایل‌های خروجی:"
           ls -lh "${OUT_PATH}"* || true
 
@@ -166,6 +194,9 @@ jobs:
 
           git commit -m "Add ${{ env.BASE_NAME }} (category: ${{ env.CAT }}, id: ${{ env.COUNTER }})" || echo "Nothing to commit"
           git push
+
+
+
 
       - name: 🕒 حذف خودکار بعد از ۱ ساعت
         shell: bash
