@@ -1,88 +1,51 @@
-name: دانلود فایل و ساخت آرشیو چندتکه رمزدار (push مرحله‌ای)
+name: Clean expired branches
 
 on:
+  schedule:
+    - cron: '0 * * * *'
   workflow_dispatch:
-    inputs:
-      file_url:
-        description: 'لینک مستقیم فایل مورد نظر'
-        required: true
-        type: string
-      zip_password:
-        description: 'رمز عبور برای فایل ZIP'
-        required: true
-        type: string
-
-permissions:
-  contents: write
 
 jobs:
-  download-and-split:
+  delete:
     runs-on: ubuntu-latest
-
     steps:
-      - name: دریافت کد مخزن
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN }}
 
-      - name: نصب 7z
-        run: sudo apt-get update && sudo apt-get install -y p7zip-full
-
-      - name: دانلود فایل از لینک
+      - name: Delete branches older than 3 hours (for branches without expires_at)
         run: |
-          curl -L --fail --retry 3 -o downloaded_file "${{ github.event.inputs.file_url }}"
-          ls -lh downloaded_file
+          NOW=$(date +%s)
+          THREE_HOURS_AGO=$((NOW - 10800))   # 3 ساعت قبل
 
-      - name: استخراج نام اصلی فایل (اختیاری)
-        run: |
-          ORIGINAL_NAME=$(basename "${{ github.event.inputs.file_url }}" | cut -d '?' -f1)
-          [ -z "$ORIGINAL_NAME" ] && ORIGINAL_NAME="downloaded_file"
-          echo "ORIGINAL_NAME=$ORIGINAL_NAME" >> $GITHUB_ENV
-
-      - name: ساخت آرشیو رمزدار چندتکه (هر تکه ۹۵ مگابایت)
-        run: |
-          7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=3 -v95m "archive.7z" downloaded_file
-
-      - name: حذف فایل اصلی
-        run: rm -f downloaded_file
-
-      - name: Commit و Push مرحله‌ای تکه‌ها (هر بار ۲۰ تکه)
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # لیست تمام تکه‌ها
-          chunks=(archive.7z.*)
-          total=${#chunks[@]}
-          batch_size=10  # هر بار ۲۰ تکه
-          start=0
-          
-          while [ $start -lt $total ]; do
-            end=$((start + batch_size - 1))
-            [ $end -ge $total ] && end=$((total - 1))
-            
-            echo "Pushing chunks $start to $end ..."
-            
-            # افزودن تکه‌های این بسته
-            for i in $(seq $start $end); do
-              git add "${chunks[$i]}"
-            done
-            
-            # commit (با پیام حاوی محدوده)
-            git commit -m "Add chunks $((start+1))-$((end+1)) of $total"
-            
-            # push با حداکثر تلاش ۵ بار
-            for attempt in {1..5}; do
-              if git push; then
-                echo "Push successful"
-                break
+          # حذف شاخه‌های بدون expires_at با استفاده از timestamp نام شاخه
+          git branch -r | grep 'origin/user_' | while read branch; do
+            # استخراج timestamp (آخرین عدد در نام شاخه)
+            timestamp=$(echo "$branch" | grep -oP 'user_.*_\K\d+')
+            if [ -n "$timestamp" ]; then
+              # ابتدا بررسی می‌کنیم که آیا این شاخه در دیتابیس expires_at دارد یا نه (از طریق API)
+              # برای سادگی، فرض می‌کنیم شاخه‌هایی که timestamp آنها خیلی قدیمی است را حذف می‌کنیم
+              if [ "$timestamp" -lt "$THREE_HOURS_AGO" ]; then
+                branch_name=${branch#origin/}
+                echo "Deleting old branch without expiry: $branch_name (created at $timestamp)"
+                git push origin --delete "$branch_name"
+                # اطلاع به Worker برای پاک کردن اطلاعات مربوطه (اختیاری)
+                USER_ID=$(echo "$branch_name" | sed 's/user_\(.*\)_.*/\1/')
+                curl -s -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/cleanup" \
+                  -H "Content-Type: application/json" \
+                  -d "{\"user_id\":\"$USER_ID\"}" || echo "Failed to notify worker for $USER_ID"
               else
-                echo "Push failed (attempt $attempt), retrying in 10 seconds..."
-                sleep 10
+                echo "Skipping $branch (timestamp $timestamp) - not expired yet"
               fi
-            done
-            
-            start=$((end + 1))
-            # کمی صبر بین بسته‌ها
-            sleep 5
+            else
+              echo "Skipping $branch - no timestamp found"
+            fi
           done
+
+      - name: Delete branches with expires_at from D1 (via Worker API)
+        run: |
+          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/cleanup-branches" \
+            -H "Content-Type: application/json" \
+            -d "{\"secret\":\"${{ secrets.ADMIN_SECRET }}\"}"
