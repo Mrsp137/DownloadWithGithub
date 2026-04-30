@@ -29,6 +29,10 @@ concurrency:
 jobs:
   download-and-commit:
     runs-on: ubuntu-latest
+    outputs:
+      parts_json: ${{ steps.parts.outputs.parts_json }}
+      base_name: ${{ env.BASE_NAME }}
+      folder: ${{ env.FINAL_DIR }}
     steps:
       - name: 🔄 دریافت کد مخزن
         uses: actions/checkout@v4
