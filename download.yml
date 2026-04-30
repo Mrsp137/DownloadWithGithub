@@ -1,1 +1,150 @@
+name: '📦 حرفه‌ای: دانلود و ذخیره در مخزن'
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_url:
+        description: '🔗 لینک مستقیم فایل'
+        required: true
+        type: string
+      password:
+        description: '🔐 رمز فایل فشرده (اختیاری)'
+        required: false
+        type: string
+        default: ''
+      split_size:
+        description: '📦 حجم هر تکه (پیش‌فرض: 95m) مثال: 95m, 100m, 200m'
+        required: false
+        type: string
+        default: '95m'
+
+permissions:
+  contents: write
+
+# جلوگیری از تداخل شمارنده
+concurrency:
+  group: "download-serial"
+  cancel-in-progress: false
+
+jobs:
+  download-and-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🔄 دریافت کد مخزن
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: ⚙️ نصب ابزارها
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full file
+
+      - name: 🧮 آماده‌سازی شمارنده
+        run: |
+          if [ ! -f counter.txt ]; then
+            echo "0" > counter.txt
+          fi
+
+      - name: 📥 دانلود فایل
+        id: download
+        run: |
+          URL="${{ github.event.inputs.file_url }}"
+          echo "در حال دانلود از: $URL"
+          curl -L --fail --retry 5 --retry-delay 5 --progress-bar -o downloaded_file "$URL"
+          if [ $? -ne 0 ]; then exit 1; fi
+          ls -lh downloaded_file
+
+      - name: 🧠 تشخیص نوع و استخراج نام اصلی
+        id: classify
+        run: |
+          # نام اصلی از لینک (بدون پارامترها)
+          RAW_NAME=$(basename "${{ github.event.inputs.file_url }}" | sed 's/\?.*//' | sed 's/%20/ /g')
+          if [ -z "$RAW_NAME" ]; then RAW_NAME="unknown_file"; fi
+          
+          # جدا کردن نام پایه (بدون پسوند) برای پوشه
+          BASENAME_NOEXT="${RAW_NAME%.*}"
+          if [ "$BASENAME_NOEXT" = "$RAW_NAME" ]; then
+            BASENAME_NOEXT="$RAW_NAME"
+          fi
+          # نام امن برای پوشه
+          FOLDER_NAME=$(echo "$BASENAME_NOEXT" | sed 's/[\\/:*?"<>|]/_/g')
+          if [ -z "$FOLDER_NAME" ]; then FOLDER_NAME="downloaded_file"; fi
+          
+          # نام امن برای فایل
+          ORIGINAL_FILENAME=$(echo "$RAW_NAME" | sed 's/[\\/:*?"<>|]/_/g')
+          
+          # تشخیص MIME و دسته‌بندی
+          MIME=$(file -b --mime-type downloaded_file)
+          EXT="${RAW_NAME##*.}"
+          EXT=$(echo "$EXT" | tr '[:upper:]' '[:lower:]')
+          
+          if [[ "$MIME" == video/* ]] || [[ "$EXT" =~ ^(mp4|mkv|avi|mov|wmv|flv|webm)$ ]]; then
+            CAT="video"
+          elif [[ "$MIME" == audio/* ]] || [[ "$EXT" =~ ^(mp3|wav|ogg|flac|m4a)$ ]]; then
+            CAT="audio"
+          elif [[ "$MIME" == image/* ]] || [[ "$EXT" =~ ^(jpg|jpeg|png|gif|bmp|webp)$ ]]; then
+            CAT="image"
+          elif [[ "$MIME" == application/pdf ]] || [[ "$EXT" =~ ^(pdf|doc|docx|xls|xlsx|ppt|pptx|txt)$ ]]; then
+            CAT="document"
+          else
+            CAT="other"
+          fi
+          
+          echo "CAT=$CAT" >> $GITHUB_ENV
+          echo "FOLDER_NAME=$FOLDER_NAME" >> $GITHUB_ENV
+          echo "ORIGINAL_FILENAME=$ORIGINAL_FILENAME" >> $GITHUB_ENV
+          echo "✅ دسته: $CAT → زیرپوشه: $FOLDER_NAME"
+          echo "📄 نام اصلی فایل: $ORIGINAL_FILENAME"
+
+      - name: 🔄 تغییر نام فایل به نام اصلی
+        run: |
+          mv downloaded_file "${{ env.ORIGINAL_FILENAME }}"
+          echo "فایل به نام ${{ env.ORIGINAL_FILENAME }} تغییر نام یافت"
+          ls -lh "${{ env.ORIGINAL_FILENAME }}"
+
+      - name: 🗜️ فشرده‌سازی ZIP و افزایش شمارنده
+        run: |
+          # افزایش شمارنده
+          i=$(cat counter.txt)
+          i=$((i+1))
+          echo "$i" > counter.txt
+
+          FINAL_DIR="downloads/${{ env.CAT }}/${{ env.FOLDER_NAME }}"
+          mkdir -p "$FINAL_DIR"
+
+          ZIP_NAME="telegram-${i}.zip"
+          ZIP_PATH="$FINAL_DIR/$ZIP_NAME"
+
+          # پاک‌سازی قبلی
+          rm -f "$FINAL_DIR"/telegram-${i}.zip*
+
+          if [ -z "${{ github.event.inputs.password }}" ]; then
+            7z a -tzip -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$ZIP_PATH" "./${{ env.ORIGINAL_FILENAME }}"
+          else
+            7z a -tzip -p"${{ github.event.inputs.password }}" -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$ZIP_PATH" "./${{ env.ORIGINAL_FILENAME }}"
+          fi
+
+          echo "ZIP_PATH=$ZIP_PATH" >> $GITHUB_ENV
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+          echo "✅ خروجی: $ZIP_PATH"
+          ls -lh "$FINAL_DIR"
+
+      - name: 📝 کامیت و پوش به مخزن
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add counter.txt downloads/
+          git commit -m "Add ${{ env.ZIP_NAME }} (category: ${{ env.CAT }})" || echo "Nothing to commit"
+          git push
+
+      - name: 🕒 حذف خودکار بعد از ۱ ساعت
+        run: |
+          sleep 3600
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # حذف همه تکه‌های zip (در صورت split)
+          git rm -f "${{ env.ZIP_PATH }}"* || true
+          git commit -m "Remove ${{ env.ZIP_NAME }}" || echo "Nothing to commit"
+          git push
 
