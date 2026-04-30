@@ -1,4 +1,4 @@
-name: '📦 حرفه‌ای: دانلود و ذخیره در مخزن'
+name: '📦 دانلود، ZIP، لینک‌دهی به ربات، حذف خودکار'
 
 on:
   workflow_dispatch:
@@ -8,71 +8,88 @@ on:
         required: true
         type: string
       password:
-        description: '🔐 رمز فایل فشرده (اختیاری)'
+        description: '🔐 رمز ZIP (اختیاری)'
         required: false
         type: string
         default: ''
       split_size:
-        description: '📦 حجم هر تکه (پیش‌فرض: 95m) مثال: 95m, 100m, 200m'
+        description: '📦 حجم هر پارت (مثال: 95m, 100m, 200m)'
         required: false
         type: string
         default: '95m'
 
 permissions:
   contents: write
+  actions: write
 
-# جلوگیری از تداخل شمارنده
 concurrency:
   group: "download-serial"
   cancel-in-progress: false
 
+env:
+  # حتماً با مقادیر خودت عوض کن:
+  REPO_OWNER: "YOUR_GITHUB_USERNAME_OR_ORG"
+  REPO_NAME: "YOUR_REPO_NAME"
+  DEFAULT_BRANCH: "main"
+
 jobs:
-  download-and-commit:
+  build_and_publish:
     runs-on: ubuntu-latest
+
+    outputs:
+      counter: ${{ steps.pack.outputs.counter }}
+      base_name: ${{ steps.pack.outputs.base_name }}
+      out_prefix: ${{ steps.pack.outputs.out_prefix }}
+      final_dir: ${{ steps.pack.outputs.final_dir }}
+      parts_json: ${{ steps.collect.outputs.parts_json }}
+      download_links_json: ${{ steps.collect.outputs.download_links_json }}
+
     steps:
-      - name: 🔄 دریافت کد مخزن
+      - name: 🔄 Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: ⚙️ نصب ابزارها
+      - name: ⚙️ Install tools
+        shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y p7zip-full file
+          sudo apt-get install -y p7zip-full file jq
 
-      - name: 📥 دانلود فایل
+      - name: 📥 Download file
         id: download
         shell: bash
         run: |
           set -euo pipefail
           URL="${{ github.event.inputs.file_url }}"
-          echo "در حال دانلود از: $URL"
+          [[ "$URL" =~ ^https?:// ]] || { echo "❌ file_url باید http/https باشد"; exit 1; }
+
+          echo "Downloading: $URL"
           curl -L --fail --retry 5 --retry-delay 5 --progress-bar -o downloaded_file "$URL"
           ls -lh downloaded_file
 
-      - name: 🧠 تشخیص نوع و استخراج نام اصلی
+      - name: 🧠 Detect category + safe names
         id: classify
         shell: bash
         run: |
           set -euo pipefail
 
-          RAW_NAME=$(basename "${{ github.event.inputs.file_url }}" | sed 's/\?.*//' | sed 's/%20/ /g')
-          if [ -z "$RAW_NAME" ]; then RAW_NAME="unknown_file"; fi
-          
-          BASENAME_NOEXT="${RAW_NAME%.*}"
-          if [ "$BASENAME_NOEXT" = "$RAW_NAME" ]; then
-            BASENAME_NOEXT="$RAW_NAME"
-          fi
+          RAW_NAME="$(basename "${{ github.event.inputs.file_url }}" | sed 's/\?.*//' | sed 's/%20/ /g')"
+          [ -n "$RAW_NAME" ] || RAW_NAME="unknown_file"
 
-          FOLDER_NAME=$(echo "$BASENAME_NOEXT" | sed 's/[\\/:*?"<>|]/_/g')
-          if [ -z "$FOLDER_NAME" ]; then FOLDER_NAME="downloaded_file"; fi
-          
-          ORIGINAL_FILENAME=$(echo "$RAW_NAME" | sed 's/[\\/:*?"<>|]/_/g')
-          
-          MIME=$(file -b --mime-type downloaded_file)
+          BASENAME_NOEXT="${RAW_NAME%.*}"
+          [ "$BASENAME_NOEXT" != "$RAW_NAME" ] || BASENAME_NOEXT="$RAW_NAME"
+
+          FOLDER_NAME="$(echo "$BASENAME_NOEXT" | sed 's/[\\/:*?"<>|]/_/g')"
+          [ -n "$FOLDER_NAME" ] || FOLDER_NAME="downloaded_file"
+
+          ORIGINAL_FILENAME="$(echo "$RAW_NAME" | sed 's/[\\/:*?"<>|]/_/g')"
+
+          MIME="$(file -b --mime-type downloaded_file)"
           EXT="${RAW_NAME##*.}"
-          EXT=$(echo "$EXT" | tr '[:upper:]' '[:lower:]')
-          
+          EXT="$(echo "$EXT" | tr '[:upper:]' '[:lower:]')"
+
           if [[ "$MIME" == video/* ]] || [[ "$EXT" =~ ^(mp4|mkv|avi|mov|wmv|flv|webm)$ ]]; then
             CAT="video"
           elif [[ "$MIME" == audio/* ]] || [[ "$EXT" =~ ^(mp3|wav|ogg|flac|m4a)$ ]]; then
@@ -84,38 +101,38 @@ jobs:
           else
             CAT="other"
           fi
-          
-          echo "CAT=$CAT" >> $GITHUB_ENV
-          echo "FOLDER_NAME=$FOLDER_NAME" >> $GITHUB_ENV
-          echo "ORIGINAL_FILENAME=$ORIGINAL_FILENAME" >> $GITHUB_ENV
-          echo "✅ دسته: $CAT → زیرپوشه: $FOLDER_NAME"
-          echo "📄 نام اصلی فایل: $ORIGINAL_FILENAME"
 
-      - name: 🔄 تغییر نام فایل به نام اصلی
+          echo "CAT=$CAT" >> "$GITHUB_ENV"
+          echo "FOLDER_NAME=$FOLDER_NAME" >> "$GITHUB_ENV"
+          echo "ORIGINAL_FILENAME=$ORIGINAL_FILENAME" >> "$GITHUB_ENV"
+
+          echo "Category: $CAT"
+          echo "Folder: $FOLDER_NAME"
+          echo "Original: $ORIGINAL_FILENAME"
+
+      - name: 🔄 Rename downloaded file
         shell: bash
         run: |
           set -euo pipefail
           mv downloaded_file "${{ env.ORIGINAL_FILENAME }}"
-          echo "فایل به نام ${{ env.ORIGINAL_FILENAME }} تغییر نام یافت"
           ls -lh "${{ env.ORIGINAL_FILENAME }}"
 
-      - name: 🗜️ فشرده‌سازی ZIP و افزایش شمارنده
+      - name: 🗜️ Zip + split + counter
         id: pack
         shell: bash
         run: |
           set -euo pipefail
 
-          # lock ساده برای جلوگیری از race روی counter
+          # lock for counter
           LOCKFILE=".counter.lock"
           exec 9>"$LOCKFILE"
           flock 9
 
-          # اطمینان از وجود شمارنده
           if [ ! -f counter.txt ] || ! [[ "$(cat counter.txt)" =~ ^[0-9]+$ ]]; then
             echo "0" > counter.txt
           fi
 
-          i=$(cat counter.txt)
+          i="$(cat counter.txt)"
           i=$((i+1))
           echo "$i" > counter.txt
 
@@ -123,30 +140,32 @@ jobs:
           mkdir -p "$FINAL_DIR"
 
           BASE_NAME="telegram-${i}.zip"
-          OUT_PATH="$FINAL_DIR/$BASE_NAME"
+          OUT_PREFIX="$FINAL_DIR/$BASE_NAME"
 
-          # پاک‌سازی قبلی
-          rm -f "${OUT_PATH}" "${OUT_PATH}".* || true
+          rm -f "${OUT_PREFIX}" "${OUT_PREFIX}".* || true
 
-          if [ -n "${{ github.event.inputs.password }}" ]; then
-            7z a -tzip -p"${{ github.event.inputs.password }}" -mem=AES256 -mx=3 \
-              -v${{ github.event.inputs.split_size }} "$OUT_PATH" "./${{ env.ORIGINAL_FILENAME }}"
+          SPLIT="${{ github.event.inputs.split_size }}"
+          PASS="${{ github.event.inputs.password }}"
+
+          if [ -n "$PASS" ]; then
+            7z a -tzip -p"$PASS" -mem=AES256 -mx=3 -v"$SPLIT" "$OUT_PREFIX" "./${{ env.ORIGINAL_FILENAME }}"
           else
-            7z a -tzip -mx=3 \
-              -v${{ github.event.inputs.split_size }} "$OUT_PATH" "./${{ env.ORIGINAL_FILENAME }}"
+            7z a -tzip -mx=3 -v"$SPLIT" "$OUT_PREFIX" "./${{ env.ORIGINAL_FILENAME }}"
           fi
 
-          # اطمینان از خروجی واقعی
           shopt -s nullglob
-          parts=( "${OUT_PATH}" "${OUT_PATH}".* )
+          parts=( "${OUT_PREFIX}" "${OUT_PREFIX}".* )
           shopt -u nullglob
+          [ ${#parts[@]} -gt 0 ] || { echo "❌ خروجی zip ساخته نشد"; exit 1; }
 
-          if [ ${#parts[@]} -eq 0 ]; then
-            echo "❌ هیچ خروجی‌ای ساخته نشد."
-            exit 1
-          fi
+          ls -lh "${OUT_PREFIX}"* || true
 
-      - name: 📝 کامیت و پوش به مخزن
+          echo "counter=$i" >> "$GITHUB_OUTPUT"
+          echo "base_name=$BASE_NAME" >> "$GITHUB_OUTPUT"
+          echo "out_prefix=$OUT_PREFIX" >> "$GITHUB_OUTPUT"
+          echo "final_dir=$FINAL_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: 📝 Commit & push files
         shell: bash
         run: |
           set -euo pipefail
@@ -154,28 +173,92 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add counter.txt
-          git add "${{ env.OUT_PATH }}"* || true
+          git add "${{ steps.pack.outputs.out_prefix }}"* || true
 
-          git commit -m "Add ${{ env.BASE_NAME }} (category: ${{ env.CAT }}, id: ${{ env.COUNTER }})" || echo "Nothing to commit"
+          git commit -m "Add ${{ steps.pack.outputs.base_name }} (id:${{ steps.pack.outputs.counter }})" || echo "Nothing to commit"
           git push
 
-
-
-
-      - name: 🕒 حذف خودکار بعد از ۱ ساعت
+      - name: 🔗 Build parts list + direct download links
+        id: collect
         shell: bash
         run: |
           set -euo pipefail
-          sleep 30
 
+          PREFIX="${{ steps.pack.outputs.out_prefix }}"
+          OWNER="${{ env.REPO_OWNER }}"
+          REPO="${{ env.REPO_NAME }}"
+          BRANCH="${{ env.DEFAULT_BRANCH }}"
+
+          shopt -s nullglob
+          files=( "${PREFIX}"* )
+          shopt -u nullglob
+          [ ${#files[@]} -gt 0 ] || { echo "❌ part file not found"; exit 1; }
+
+          # sort طبیعی (001,002,...)
+          IFS=$'\n' files=($(printf '%s\n' "${files[@]}" | sort -V))
+          unset IFS
+
+          parts_json="$(printf '%s\n' "${files[@]}" | jq -R . | jq -s .)"
+
+          links_tmp=()
+          for f in "${files[@]}"; do
+            enc_path="$(python3 - << 'PY'
+import urllib.parse,sys
+print(urllib.parse.quote(sys.stdin.read().strip()))
+PY
+<<< "$f")"
+            links_tmp+=( "https://raw.githubusercontent.com/${OWNER}/${REPO}/${BRANCH}/${enc_path}" )
+          done
+          download_links_json="$(printf '%s\n' "${links_tmp[@]}" | jq -R . | jq -s .)"
+
+          echo "parts_json=$parts_json" >> "$GITHUB_OUTPUT"
+          echo "download_links_json=$download_links_json" >> "$GITHUB_OUTPUT"
+
+          echo "Parts:"
+          echo "$parts_json" | jq .
+          echo "Links:"
+          echo "$download_links_json" | jq .
+
+      - name: 📤 Summary for bot/API
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "### ✅ Build Done"
+            echo ""
+            echo "- id: \`${{ steps.pack.outputs.counter }}\`"
+            echo "- base: \`${{ steps.pack.outputs.base_name }}\`"
+            echo "- dir: \`${{ steps.pack.outputs.final_dir }}\`"
+            echo ""
+            echo "#### Download Links"
+            echo '${{ steps.collect.outputs.download_links_json }}' | jq -r '.[] | "- " + .'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  cleanup_after_1h:
+    runs-on: ubuntu-latest
+    needs: build_and_publish
+    if: ${{ needs.build_and_publish.result == 'success' }}
+    steps:
+      - name: 🕒 Wait 1 hour
+        shell: bash
+        run: sleep 3600
+
+      - name: 🔄 Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 🧹 Remove parts and push
+        shell: bash
+        run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # جلوگیری از conflict
           git pull --rebase
 
-          # حذف همه پارت‌ها
-          git rm -f "${{ env.OUT_PATH }}"* || true
+          PREFIX="${{ needs.build_and_publish.outputs.out_prefix }}"
+          git rm -f "${PREFIX}"* || true
 
-          git commit -m "Remove ${{ env.BASE_NAME }} (id: ${{ env.COUNTER }})" || echo "Nothing to commit"
+          git commit -m "Remove ${{ needs.build_and_publish.outputs.base_name }} (id:${{ needs.build_and_publish.outputs.counter }}) after 1h" || echo "Nothing to commit"
           git push
