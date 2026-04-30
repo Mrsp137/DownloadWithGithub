@@ -29,7 +29,7 @@ concurrency:
 env:
   # حتماً با مقادیر خودت عوض کن:
   REPO_OWNER: "Mrsp137"
-  REPO_NAME: "DownloadWithGithub"
+  REPO_NAME: "DownloadWithGithub/.github/workflows"
   DEFAULT_BRANCH: "main"
 
 jobs:
