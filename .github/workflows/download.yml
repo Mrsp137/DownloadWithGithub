@@ -29,10 +29,6 @@ concurrency:
 jobs:
   download-and-commit:
     runs-on: ubuntu-latest
-    outputs:
-      parts_json: ${{ steps.parts.outputs.parts_json }}
-      base_name: ${{ env.BASE_NAME }}
-      folder: ${{ env.FINAL_DIR }}
     steps:
       - name: 🔄 دریافت کد مخزن
         uses: actions/checkout@v4
@@ -150,42 +146,6 @@ jobs:
             exit 1
           fi
 
-      
-      - name: 📃 ساخت لیست پارت‌ها برای ربات
-        id: parts
-        shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          files=( "${{ env.OUT_PATH }}"* )
-          shopt -u nullglob
-
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "❌ هیچ فایلی برای ارسال پیدا نشد."
-            exit 1
-          fi
-
-          # ساخت JSON آرایه‌ای از مسیر فایل‌ها
-          json="["
-          for f in "${files[@]}"; do
-            esc=$(printf '%s' "$f" | sed 's/\\/\\\\/g; s/"/\\"/g')
-            json="$json\"$esc\","
-          done
-          json="${json%,}]"
-
-          echo "parts_json=$json" >> "$GITHUB_OUTPUT"
-          echo "✅ parts_json ساخته شد: $json"
-
-
-          
-          echo "✅ فایل‌های خروجی:"
-          ls -lh "${OUT_PATH}"* || true
-
-          echo "COUNTER=$i" >> "$GITHUB_ENV"
-          echo "FINAL_DIR=$FINAL_DIR" >> "$GITHUB_ENV"
-          echo "BASE_NAME=$BASE_NAME" >> "$GITHUB_ENV"
-          echo "OUT_PATH=$OUT_PATH" >> "$GITHUB_ENV"
-
       - name: 📝 کامیت و پوش به مخزن
         shell: bash
         run: |
@@ -206,7 +166,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sleep 3600
+          sleep 30
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
