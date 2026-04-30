@@ -1,51 +1,130 @@
-name: Clean expired branches
+name: Download and Split for User
 
 on:
-  schedule:
-    - cron: '0 * * * *'
   workflow_dispatch:
+    inputs:
+      file_url:
+        description: 'لینک مستقیم فایل'
+        required: true
+        type: string
+      zip_password:
+        description: 'رمز عبور ZIP'
+        required: true
+        type: string
+      user_id:
+        description: 'شناسه کاربر'
+        required: true
+        type: string
+
+permissions:
+  contents: write
 
 jobs:
-  delete:
+  process:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Notify Worker that job started
+        run: |
+          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/started" \
+            -H "Content-Type: application/json" \
+            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\"}"
+
+      - name: Optimized Checkout (fast)
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          token: ${{ secrets.GH_TOKEN }}
+          fetch-depth: 1
 
-      - name: Delete branches older than 3 hours (for branches without expires_at)
+      - name: Install 7z
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full
+
+      - name: Download file with resume support (using wget)
         run: |
-          NOW=$(date +%s)
-          THREE_HOURS_AGO=$((NOW - 10800))   # 3 ساعت قبل
+          ORIGINAL_NAME=$(basename "${{ github.event.inputs.file_url }}" | cut -d '?' -f1)
+          if [ -z "$ORIGINAL_NAME" ]; then
+            ORIGINAL_NAME="downloaded_file"
+          fi
+          echo "ORIGINAL_NAME=$ORIGINAL_NAME" >> $GITHUB_ENV
+          
+          echo "Starting download of: $ORIGINAL_NAME"
+          wget -c -t 20 -T 60 --retry-connrefused --waitretry=5 -O "$ORIGINAL_NAME" "${{ github.event.inputs.file_url }}"
+          
+          # Verify file is not empty
+          if [ ! -s "$ORIGINAL_NAME" ]; then
+            echo "❌ Downloaded file is empty or missing!"
+            exit 1
+          fi
+          echo "✅ Download completed successfully"
 
-          # حذف شاخه‌های بدون expires_at با استفاده از timestamp نام شاخه
-          git branch -r | grep 'origin/user_' | while read branch; do
-            # استخراج timestamp (آخرین عدد در نام شاخه)
-            timestamp=$(echo "$branch" | grep -oP 'user_.*_\K\d+')
-            if [ -n "$timestamp" ]; then
-              # ابتدا بررسی می‌کنیم که آیا این شاخه در دیتابیس expires_at دارد یا نه (از طریق API)
-              # برای سادگی، فرض می‌کنیم شاخه‌هایی که timestamp آنها خیلی قدیمی است را حذف می‌کنیم
-              if [ "$timestamp" -lt "$THREE_HOURS_AGO" ]; then
-                branch_name=${branch#origin/}
-                echo "Deleting old branch without expiry: $branch_name (created at $timestamp)"
-                git push origin --delete "$branch_name"
-                # اطلاع به Worker برای پاک کردن اطلاعات مربوطه (اختیاری)
-                USER_ID=$(echo "$branch_name" | sed 's/user_\(.*\)_.*/\1/')
-                curl -s -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/cleanup" \
-                  -H "Content-Type: application/json" \
-                  -d "{\"user_id\":\"$USER_ID\"}" || echo "Failed to notify worker for $USER_ID"
-              else
-                echo "Skipping $branch (timestamp $timestamp) - not expired yet"
-              fi
-            else
-              echo "Skipping $branch - no timestamp found"
-            fi
-          done
-
-      - name: Delete branches with expires_at from D1 (via Worker API)
+      - name: Create archive chunks (95MB each)
         run: |
-          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/cleanup-branches" \
+          7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=3 -v95m "archive.7z" "${{ env.ORIGINAL_NAME }}"
+
+      - name: Clean up original file
+        run: rm -f "${{ env.ORIGINAL_NAME }}"
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Get total chunks count
+        id: chunks
+        run: |
+          CHUNKS=$(ls archive.7z.* 2>/dev/null | wc -l)
+          echo "total_chunks=$CHUNKS" >> $GITHUB_OUTPUT
+
+      - name: Notify Worker about total chunks
+        run: |
+          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/progress" \
             -H "Content-Type: application/json" \
-            -d "{\"secret\":\"${{ secrets.ADMIN_SECRET }}\"}"
+            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"total_chunks\":${{ steps.chunks.outputs.total_chunks }}}"
+
+      - name: Create user branch
+        run: |
+          BRANCH_NAME="user_${{ github.event.inputs.user_id }}_$(date +%s)"
+          git checkout --orphan "$BRANCH_NAME"
+          git rm -rf . 2>/dev/null || true
+          echo "# Files for user ${{ github.event.inputs.user_id }}" > README.md
+          chunks=(archive.7z.*)
+          total=${#chunks[@]}
+          batch_size=2
+          start=0
+          uploaded=0
+          while [ $start -lt $total ]; do
+            end=$((start + batch_size - 1))
+            [ $end -ge $total ] && end=$((total - 1))
+            for i in $(seq $start $end); do
+              git add "${chunks[$i]}"
+            done
+            git add README.md
+            git commit -m "Add chunks $((start+1))-$((end+1)) of $total"
+            for attempt in {1..5}; do
+              if git push origin "$BRANCH_NAME"; then
+                echo "Push successful for chunks $((start+1))-$((end+1))"
+                uploaded=$((end+1))
+                break
+              else
+                echo "Push failed (attempt $attempt), retrying in 10 seconds..."
+                sleep 10
+              fi
+            done
+            curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/progress" \
+              -H "Content-Type: application/json" \
+              -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"uploaded_chunks\":$uploaded}"
+            start=$((end + 1))
+            sleep 2
+          done
+          echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
+
+      - name: Notify Worker that job is done
+        run: |
+          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/complete" \
+            -H "Content-Type: application/json" \
+            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"branch\":\"${{ env.BRANCH_NAME }}\"}"
+
+      - name: Notify Worker on failure
+        if: failure()
+        run: |
+          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/failed" \
+            -H "Content-Type: application/json" \
+            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"error\":\"Workflow failed\"}"
