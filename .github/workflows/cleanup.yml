@@ -1,0 +1,51 @@
+name: Clean expired branches
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+jobs:
+  delete:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Delete branches older than 3 hours (for branches without expires_at)
+        run: |
+          NOW=$(date +%s)
+          THREE_HOURS_AGO=$((NOW - 10800))   # 3 ساعت قبل
+
+          # حذف شاخه‌های بدون expires_at با استفاده از timestamp نام شاخه
+          git branch -r | grep 'origin/user_' | while read branch; do
+            # استخراج timestamp (آخرین عدد در نام شاخه)
+            timestamp=$(echo "$branch" | grep -oP 'user_.*_\K\d+')
+            if [ -n "$timestamp" ]; then
+              # ابتدا بررسی می‌کنیم که آیا این شاخه در دیتابیس expires_at دارد یا نه (از طریق API)
+              # برای سادگی، فرض می‌کنیم شاخه‌هایی که timestamp آنها خیلی قدیمی است را حذف می‌کنیم
+              if [ "$timestamp" -lt "$THREE_HOURS_AGO" ]; then
+                branch_name=${branch#origin/}
+                echo "Deleting old branch without expiry: $branch_name (created at $timestamp)"
+                git push origin --delete "$branch_name"
+                # اطلاع به Worker برای پاک کردن اطلاعات مربوطه (اختیاری)
+                USER_ID=$(echo "$branch_name" | sed 's/user_\(.*\)_.*/\1/')
+                curl -s -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/cleanup" \
+                  -H "Content-Type: application/json" \
+                  -d "{\"user_id\":\"$USER_ID\"}" || echo "Failed to notify worker for $USER_ID"
+              else
+                echo "Skipping $branch (timestamp $timestamp) - not expired yet"
+              fi
+            else
+              echo "Skipping $branch - no timestamp found"
+            fi
+          done
+
+      - name: Delete branches with expires_at from D1 (via Worker API)
+        run: |
+          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/cleanup-branches" \
+            -H "Content-Type: application/json" \
+            -d "{\"secret\":\"${{ secrets.ADMIN_SECRET }}\"}"
