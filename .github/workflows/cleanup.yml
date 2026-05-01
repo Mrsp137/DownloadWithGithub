@@ -18,7 +18,7 @@ jobs:
       - name: Delete branches older than 3 hours (for branches without expires_at)
         run: |
           NOW=$(date +%s)
-          THREE_HOURS_AGO=$((NOW - 10800))   # 3 ساعت قبل
+          THREE_HOURS_AGO=$((NOW - 7200))   # 2 ساعت قبل
 
           # حذف شاخه‌های بدون expires_at با استفاده از timestamp نام شاخه
           git branch -r | grep 'origin/user_' | while read branch; do
