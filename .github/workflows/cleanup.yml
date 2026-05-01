@@ -5,37 +5,30 @@ on:
     - cron: '0 * * * *'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   delete:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GH_TOKEN }}
 
-      - name: Delete branches older than 3 hours (for branches without expires_at)
+      - name: Delete branches older than 3 hours
         run: |
           NOW=$(date +%s)
-          THREE_HOURS_AGO=$((NOW - 7200))   # 2 ساعت قبل
+          THREE_HOURS_AGO=$((NOW - 3600))  # 3 ساعت قبل
 
-          # حذف شاخه‌های بدون expires_at با استفاده از timestamp نام شاخه
           git branch -r | grep 'origin/user_' | while read branch; do
-            # استخراج timestamp (آخرین عدد در نام شاخه)
             timestamp=$(echo "$branch" | grep -oP 'user_.*_\K\d+')
             if [ -n "$timestamp" ]; then
-              # ابتدا بررسی می‌کنیم که آیا این شاخه در دیتابیس expires_at دارد یا نه (از طریق API)
-              # برای سادگی، فرض می‌کنیم شاخه‌هایی که timestamp آنها خیلی قدیمی است را حذف می‌کنیم
               if [ "$timestamp" -lt "$THREE_HOURS_AGO" ]; then
                 branch_name=${branch#origin/}
-                echo "Deleting old branch without expiry: $branch_name (created at $timestamp)"
-                git push origin --delete "$branch_name"
-                # اطلاع به Worker برای پاک کردن اطلاعات مربوطه (اختیاری)
-                USER_ID=$(echo "$branch_name" | sed 's/user_\(.*\)_.*/\1/')
-                curl -s -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/cleanup" \
-                  -H "Content-Type: application/json" \
-                  -d "{\"user_id\":\"$USER_ID\"}" || echo "Failed to notify worker for $USER_ID"
+                echo "Deleting old branch: $branch_name (created at $timestamp)"
+                git push origin --delete "$branch_name" || echo "Failed to delete $branch_name"
               else
                 echo "Skipping $branch (timestamp $timestamp) - not expired yet"
               fi
@@ -43,4 +36,3 @@ jobs:
               echo "Skipping $branch - no timestamp found"
             fi
           done
-
