@@ -140,10 +140,14 @@ jobs:
       - name: Notify job done (Telegram)
         run: |
           MSG="🎉 Job done | user: ${{ github.event.inputs.user_id }} | branch: ${{ env.BRANCH_NAME }}"
+          DOWN= "https://github.com/Mrsp137/DownloadWithGithub/archive/refs/heads/${{ env.BRANCH_NAME }}.zip"
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d "chat_id=${TELEGRAM_CHAT_ID}" \
             --data-urlencode "text=${MSG}"
-
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${DOWN}"
+          
       - name: Notify on failure (Telegram)
         if: ${{ failure() }}
         run: |
