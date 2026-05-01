@@ -44,8 +44,3 @@ jobs:
             fi
           done
 
-      - name: Delete branches with expires_at from D1 (via Worker API)
-        run: |
-          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/cleanup-branches" \
-            -H "Content-Type: application/json" \
-            -d "{\"secret\":\"${{ secrets.ADMIN_SECRET }}\"}"
