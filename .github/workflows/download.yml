@@ -145,7 +145,7 @@ jobs:
             --data-urlencode "text=${MSG}"
       - name: Send telegram
         run: |
-          DOWN="https://github.com/Mrsp137/DownloadWithGithub/archive/refs/heads/${{ env.BRANCH_NAME }}.zip"
+          DOWN="https://github.com/Mrsp137/DownloadWithGithub/archive/refs/heads/${{ github.event.inputs.user_id }}.zip"
           MSG="${DOWN}
 
           My Channel: @FreeV2rng"
