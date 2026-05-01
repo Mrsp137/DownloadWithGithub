@@ -19,15 +19,20 @@ on:
 permissions:
   contents: write
 
+env:
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
 jobs:
   process:
     runs-on: ubuntu-latest
     steps:
-      - name: Notify Worker that job started
+      - name: Notify job started (Telegram)
         run: |
-          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/started" \
-            -H "Content-Type: application/json" \
-            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\"}"
+          MSG="✅ Job started برای user: ${{ github.event.inputs.user_id }}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${MSG}"
 
       - name: Optimized Checkout (fast)
         uses: actions/checkout@v4
@@ -73,58 +78,76 @@ jobs:
           CHUNKS=$(ls archive.7z.* 2>/dev/null | wc -l)
           echo "total_chunks=$CHUNKS" >> $GITHUB_OUTPUT
 
-      - name: Notify Worker about total chunks
+      - name: Notify total chunks (Telegram)
         run: |
-          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/progress" \
-            -H "Content-Type: application/json" \
-            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"total_chunks\":${{ steps.chunks.outputs.total_chunks }}}"
+          MSG="📦 Total chunks: ${{ steps.chunks.outputs.total_chunks }} | user: ${{ github.event.inputs.user_id }}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${MSG}"
 
-      - name: Create user branch
+      - name: Create user branch and push chunks
         run: |
           BRANCH_NAME="user_${{ github.event.inputs.user_id }}_$(date +%s)"
           git checkout --orphan "$BRANCH_NAME"
           git rm -rf . 2>/dev/null || true
           echo "# Files for user ${{ github.event.inputs.user_id }}" > README.md
+
           chunks=(archive.7z.*)
           total=${#chunks[@]}
           batch_size=2
           start=0
           uploaded=0
+
           while [ $start -lt $total ]; do
             end=$((start + batch_size - 1))
             [ $end -ge $total ] && end=$((total - 1))
+
             for i in $(seq $start $end); do
               git add "${chunks[$i]}"
             done
             git add README.md
             git commit -m "Add chunks $((start+1))-$((end+1)) of $total"
+
+            pushed=false
             for attempt in {1..5}; do
               if git push origin "$BRANCH_NAME"; then
                 echo "Push successful for chunks $((start+1))-$((end+1))"
                 uploaded=$((end+1))
+                pushed=true
                 break
               else
                 echo "Push failed (attempt $attempt), retrying in 10 seconds..."
                 sleep 10
               fi
             done
-            curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/progress" \
-              -H "Content-Type: application/json" \
-              -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"uploaded_chunks\":$uploaded}"
+
+            if [ "$pushed" = false ]; then
+              echo "❌ Push failed after 5 attempts"
+              exit 1
+            fi
+
+            MSG="⏫ Uploaded chunks: ${uploaded}/${total} | user: ${{ github.event.inputs.user_id }}"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d "chat_id=${TELEGRAM_CHAT_ID}" \
+              --data-urlencode "text=${MSG}"
+
             start=$((end + 1))
             sleep 2
           done
+
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
 
-      - name: Notify Worker that job is done
+      - name: Notify job done (Telegram)
         run: |
-          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/complete" \
-            -H "Content-Type: application/json" \
-            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"branch\":\"${{ env.BRANCH_NAME }}\"}"
+          MSG="🎉 Job done | user: ${{ github.event.inputs.user_id }} | branch: ${{ env.BRANCH_NAME }}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${MSG}"
 
-      - name: Notify Worker on failure
-        if: failure()
+      - name: Notify on failure (Telegram)
+        if: ${{ failure() }}
         run: |
-          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/failed" \
-            -H "Content-Type: application/json" \
-            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"error\":\"Workflow failed\"}"
+          MSG="❌ Workflow failed | user: ${{ github.event.inputs.user_id }}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${MSG}"
