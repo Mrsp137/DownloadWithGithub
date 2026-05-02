@@ -33,6 +33,10 @@ jobs:
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d "chat_id=${TELEGRAM_CHAT_ID}" \
             --data-urlencode "text=${MSG}"
+          MSG1="فرایند دانلود درحال شروع ..."
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${{ github.event.inputs.user_id }}" \
+            --data-urlencode "text=${MSG1}"
 
       - name: Optimized Checkout (fast)
         uses: actions/checkout@v4
@@ -58,6 +62,20 @@ jobs:
             echo "❌ Downloaded file is empty or missing!"
             exit 1
           fi
+      
+          # ✅ Check file size limit (600MB = 629145600 bytes)
+          FILE_SIZE=$(stat -c%s "$ORIGINAL_NAME")
+          MAX_SIZE=$((600 * 1024 * 1024))
+      
+          if [ "$FILE_SIZE" -gt "$MAX_SIZE" ]; then
+            MSG="❌ فایل شما بیش از ۶۰۰ مگابایت است و قابل پردازش نیست."
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d "chat_id=${{ github.event.inputs.user_id }}" \
+              --data-urlencode "text=${MSG}"
+            rm -f "$ORIGINAL_NAME"
+            exit 1
+          fi
+      
           echo "✅ Download completed successfully"
 
       - name: Create archive chunks (95MB each)
@@ -84,7 +102,12 @@ jobs:
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d "chat_id=${TELEGRAM_CHAT_ID}" \
             --data-urlencode "text=${MSG}"
-
+            
+          MSG1="تعداد کل پارت ها : ${{ steps.chunks.outputs.total_chunks }} 📦"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${{ github.event.inputs.user_id }}" \
+            --data-urlencode "text=${MSG1}"
+            
       - name: Create user branch and push chunks
         run: |
           BRANCH_NAME="user_${{ github.event.inputs.user_id }}_$(date +%s)"
@@ -147,7 +170,8 @@ jobs:
         run: |
           DOWN="https://github.com/Mrsp137/DownloadWithGithub/archive/refs/heads/${{ env.BRANCH_NAME }}.zip"
           MSG="${DOWN}
-
+          
+          لینک دانلود شما بعد از 1 ساعت منقضی خواهد شد.
           My Channel: @FreeV2rng"
 
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
@@ -161,3 +185,8 @@ jobs:
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d "chat_id=${TELEGRAM_CHAT_ID}" \
             --data-urlencode "text=${MSG}"
+
+          MSG1="❌ بسته شما دانلود نشد. جهت بررسی به ادمین پیام بفرستید : @ad_v2rr"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+          -d "chat_id=${{ github.event.inputs.user_id }}" \
+          --data-urlencode "text=${MSG1}"
