@@ -103,55 +103,120 @@ jobs:
       - name: نصب ابزارها
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y p7zip-full ffmpeg
-          pip install yt-dlp --break-system-packages
+          sudo apt-get install -y p7zip-full aria2 python3 python3-pip
+          pip install requests --break-system-packages
 
-      - name: دانلود ویدیو با yt-dlp
-        id: download
+      - name: دریافت لینک دانلود از سرویس
         run: |
           FORMAT="${{ github.event.inputs.format }}"
           QUALITY="${{ github.event.inputs.quality }}"
           URL="${{ github.event.inputs.video_url }}"
-          MAX_SIZE=$((200 * 1024 * 1024))  # ۲۰۰ مگابایت
-          TIMEOUT=1800                       # ۳۰ دقیقه
+
+          if [ "$FORMAT" = "mp3" ]; then
+            case "$QUALITY" in
+              128) QUAL="128kbps" ;;
+              192) QUAL="192kbps" ;;
+              320) QUAL="320kbps" ;;
+              *)   QUAL="192kbps" ;;
+            esac
+            OUTPUT_TYPE="audio"
+          else
+            case "$QUALITY" in
+              480p)  QUAL="480p" ;;
+              720p)  QUAL="720p" ;;
+              1080p) QUAL="1080p" ;;
+              *)     QUAL="720p" ;;
+            esac
+            OUTPUT_TYPE="video"
+          fi
+
+          python3 << PYEOF
+          import os, sys, time, re, requests
+
+          URL = """$URL"""
+          FMT = "$FORMAT"
+          QUAL = "$QUAL"
+          OUTPUT_TYPE = "$OUTPUT_TYPE"
+
+          s = requests.Session()
+          s.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+          s.get("https://media.ytmp3.gg/")
+
+          pl = {
+              "url": URL,
+              "os": "linux",
+              "output": {"type": OUTPUT_TYPE, "format": FMT},
+          }
+          if FMT == "mp3":
+              pl["audio"] = {"bitrate": QUAL}
+          else:
+              pl["output"]["quality"] = QUAL
+
+          try:
+              resp = s.post("https://hub.ytconvert.org/api/download", json=pl, timeout=30)
+              resp.raise_for_status()
+              d = resp.json()
+          except Exception as e:
+              print(f"خطا در دریافت لینک: {e}")
+              sys.exit(1)
+
+          status_url = d.get("statusUrl")
+          title = d.get("title", "video")
+
+          if not status_url:
+              print("statusUrl دریافت نشد")
+              sys.exit(1)
+
+          dl = None
+          for i in range(90):
+              time.sleep(2)
+              try:
+                  sr = s.get(status_url, timeout=15)
+                  sd = sr.json()
+                  status = sd.get("status")
+                  if status == "completed":
+                      dl = sd.get("downloadUrl")
+                      break
+                  elif status == "failed":
+                      print("تبدیل فایل شکست خورد")
+                      sys.exit(1)
+              except Exception as e:
+                  continue
+
+          if not dl:
+              print("لینک دانلود دریافت نشد")
+              sys.exit(1)
+
+          clean_title = re.sub(r'[^a-zA-Z0-9\-_]', '_', title.replace(' ','_'))[:50].strip('_') or "video"
+          fname = f"{clean_title}.{FMT}"
+
+          with open("download_info.txt", "w") as f:
+              f.write(f"{dl}\n{fname}")
+
+          print(f"لینک دانلود دریافت شد: {fname}")
+          PYEOF
+
+      - name: دانلود فایل با aria2c
+        run: |
+          DL_URL=$(head -n1 download_info.txt)
+          FNAME=$(tail -n1 download_info.txt)
+          MAX_SIZE=$((200 * 1024 * 1024))
+          TIMEOUT=1800
           DOWNLOAD_SUCCESS=false
 
           for attempt in 1 2; do
             echo "📥 تلاش دانلود شماره $attempt ..."
 
-            if [ "$FORMAT" = "mp3" ]; then
-              # تنظیم کیفیت صدا
-              case "$QUALITY" in
-                128) AUDIO_QUALITY="128K" ;;
-                192) AUDIO_QUALITY="192K" ;;
-                320) AUDIO_QUALITY="320K" ;;
-                *)   AUDIO_QUALITY="192K" ;;
-              esac
-
-              timeout $TIMEOUT yt-dlp \
-                -x \
-                --audio-format mp3 \
-                --audio-quality "$AUDIO_QUALITY" \
-                --no-playlist \
-                -o "%(title)s.%(ext)s" \
-                "$URL"
-
-            else
-              # تنظیم کیفیت ویدیو
-              case "$QUALITY" in
-                480p)  FORMAT_CODE="bestvideo[height<=480]+bestaudio/best[height<=480]" ;;
-                720p)  FORMAT_CODE="bestvideo[height<=720]+bestaudio/best[height<=720]" ;;
-                1080p) FORMAT_CODE="bestvideo[height<=1080]+bestaudio/best[height<=1080]" ;;
-                *)     FORMAT_CODE="bestvideo[height<=720]+bestaudio/best[height<=720]" ;;
-              esac
-
-              timeout $TIMEOUT yt-dlp \
-                -f "$FORMAT_CODE" \
-                --merge-output-format mp4 \
-                --no-playlist \
-                -o "%(title)s.%(ext)s" \
-                "$URL"
-            fi
+            timeout $TIMEOUT aria2c \
+              --max-connection-per-server=16 \
+              --split=16 \
+              --min-split-size=1M \
+              --continue=true \
+              --max-tries=5 \
+              --retry-wait=5 \
+              --timeout=60 \
+              --out="$FNAME" \
+              "$DL_URL"
 
             EXIT_CODE=$?
 
@@ -186,27 +251,23 @@ jobs:
               fi
             fi
 
-            # پیدا کردن فایل دانلود شده
-            DOWNLOADED_FILE=$(ls *.mp4 *.mp3 2>/dev/null | head -n1)
-
-            if [ -z "$DOWNLOADED_FILE" ]; then
-              echo "❌ فایل دانلود شده پیدا نشد"
+            if [ ! -s "$FNAME" ]; then
+              echo "❌ فایل دانلود شده خالی است"
               exit 1
             fi
 
-            # بررسی محدودیت ۲۰۰ مگابایت
-            FILE_SIZE=$(stat -c%s "$DOWNLOADED_FILE")
+            FILE_SIZE=$(stat -c%s "$FNAME")
             if [ "$FILE_SIZE" -gt "$MAX_SIZE" ]; then
               curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
                 -d "chat_id=${{ github.event.inputs.user_id }}" \
                 --data-urlencode "text=❌ حجم فایل بیش از ۲۰۰ مگابایت است و قابل پردازش نیست."
-              rm -f "$DOWNLOADED_FILE"
+              rm -f "$FNAME"
               exit 1
             fi
 
-            echo "DOWNLOADED_FILE=$DOWNLOADED_FILE" >> $GITHUB_ENV
+            echo "DOWNLOADED_FILE=$FNAME" >> $GITHUB_ENV
             DOWNLOAD_SUCCESS=true
-            echo "✅ دانلود با موفقیت انجام شد: $DOWNLOADED_FILE"
+            echo "✅ دانلود با موفقیت انجام شد: $FNAME"
             break
           done
 
@@ -219,7 +280,7 @@ jobs:
           7z a -mx=3 -v95m "archive.7z" "${{ env.DOWNLOADED_FILE }}"
 
       - name: حذف فایل اصلی
-        run: rm -f "${{ env.DOWNLOADED_FILE }}"
+        run: rm -f "${{ env.DOWNLOADED_FILE }}" download_info.txt
 
       - name: تنظیم git
         run: |
@@ -230,7 +291,6 @@ jobs:
         id: chunks
         run: |
           CHUNKS=$(ls archive.7z.* 2>/dev/null | wc -l)
-          # اگه فقط یه پارت بود
           if [ "$CHUNKS" -eq 0 ] && [ -f "archive.7z" ]; then
             CHUNKS=1
           fi
@@ -253,7 +313,6 @@ jobs:
           git rm -rf . 2>/dev/null || true
           echo "# YouTube download for user ${{ github.event.inputs.user_id }}" > README.md
 
-          # هندل کردن یک یا چند پارت
           if [ -f "archive.7z" ]; then
             CHUNKS=(archive.7z)
           else
@@ -312,7 +371,7 @@ jobs:
 
           MSG="${DOWN}
           
-          لینک دانلود شما بعد از ۲ ساعت منقضی خواهد شد  👽
+          لینک دانلود شما بعد از ۲ ساعت منقضی خواهد شد 👽
           
           📢 کانال ما: @MeliDownload_Bot"
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
