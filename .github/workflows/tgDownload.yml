@@ -1,0 +1,323 @@
+name: Telegram Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      telegram_link:
+        description: 'لینک پست تلگرام'
+        required: true
+        type: string
+      zip_password:
+        description: 'رمز عبور ZIP'
+        required: true
+        type: string
+      user_id:
+        description: 'شناسه کاربر'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+jobs:
+
+  wait-for-queue:
+    runs-on: ubuntu-latest
+    steps:
+      - name: بررسی صف و انتظار
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${{ github.repository }}"
+          MY_RUN_ID="${{ github.run_id }}"
+          MY_RUN_NUMBER="${{ github.run_number }}"
+          WORKFLOW_FILE="tgDownload.yml"
+          MAX_CONCURRENT=5
+
+          echo "🔍 Run ID: $MY_RUN_ID | Run Number: $MY_RUN_NUMBER"
+
+          POSITION=0
+          while true; do
+            ACTIVE=$(curl -s \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/actions/runs?workflow_id=${WORKFLOW_FILE}&status=in_progress&per_page=100" \
+              | jq "[.workflow_runs[] | select(.id != ($MY_RUN_ID | tonumber) and .run_number < ($MY_RUN_NUMBER | tonumber))] | length")
+
+            if [ "$ACTIVE" -lt "$MAX_CONCURRENT" ]; then
+              echo "✅ جای خالی در صف وجود دارد. شروع پردازش..."
+              break
+            fi
+
+            if [ "$POSITION" -eq 0 ]; then
+              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -d "chat_id=${{ github.event.inputs.user_id }}" \
+                --data-urlencode "text=⏳ درخواست شما در صف قرار گرفت. لطفاً صبر کنید..."
+              POSITION=1
+            fi
+
+            echo "⏳ تعداد runهای فعال: $ACTIVE — انتظار ۳۰ ثانیه..."
+            sleep 30
+          done
+
+  process:
+    needs: wait-for-queue
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: اطلاع‌رسانی شروع کار
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=✅ شروع دانلود تلگرام برای کاربر: ${{ github.event.inputs.user_id }}"
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${{ github.event.inputs.user_id }}" \
+            --data-urlencode "text=🚀 دانلود شروع شد، لطفاً منتظر بمانید..."
+
+      - name: Checkout مخزن
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: نصب ابزارها
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y p7zip-full aria2 python3 python3-pip
+          pip install requests --break-system-packages
+
+      - name: دریافت لینک دانلود از سرویس
+        run: |
+          python3 << 'PYEOF'
+          import sys, requests
+
+          LINK = "${{ github.event.inputs.telegram_link }}"
+
+          headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+          data = {"telegram_link": LINK}
+
+          try:
+              resp = requests.post(
+                  "https://telegramdownloader.net/proxy.php",
+                  headers=headers,
+                  data=data,
+                  timeout=30
+              )
+              resp.raise_for_status()
+              result = resp.json()
+
+              raw_url = result.get('data', {}).get('data', {}).get('link')
+              file_name = result.get('data', {}).get('data', {}).get('file_name')
+
+              if not raw_url or not file_name:
+                  print("❌ لینک دانلود یا نام فایل دریافت نشد")
+                  sys.exit(1)
+
+              with open("download_info.txt", "w") as f:
+                  f.write(f"{raw_url}\n{file_name}")
+
+              print(f"✅ لینک دانلود دریافت شد: {file_name}")
+
+          except Exception as e:
+              print(f"❌ خطا در دریافت لینک: {e}")
+              sys.exit(1)
+          PYEOF
+
+      - name: دانلود فایل با aria2c
+        run: |
+          DL_URL=$(head -n1 download_info.txt)
+          FNAME=$(tail -n1 download_info.txt)
+          MAX_SIZE=$((200 * 1024 * 1024))
+          TIMEOUT=1800
+          DOWNLOAD_SUCCESS=false
+
+          for attempt in 1 2; do
+            echo "📥 تلاش دانلود شماره $attempt ..."
+
+            timeout $TIMEOUT aria2c \
+              --max-connection-per-server=16 \
+              --split=16 \
+              --min-split-size=1M \
+              --continue=true \
+              --max-tries=5 \
+              --retry-wait=5 \
+              --timeout=60 \
+              --out="$FNAME" \
+              "$DL_URL"
+
+            EXIT_CODE=$?
+
+            if [ $EXIT_CODE -eq 124 ]; then
+              if [ $attempt -eq 1 ]; then
+                curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                  -d "chat_id=${{ github.event.inputs.user_id }}" \
+                  --data-urlencode "text=⚠️ دانلود بیش از ۳۰ دقیقه طول کشید. در حال تلاش مجدد..."
+                sleep 5
+                continue
+              else
+                curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                  -d "chat_id=${{ github.event.inputs.user_id }}" \
+                  --data-urlencode "text=❌ دانلود پس از ۲ تلاش ناموفق بود. لطفاً با ادمین تماس بگیرید: @MeliDownload_Admin"
+                curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                  -d "chat_id=${TELEGRAM_CHAT_ID}" \
+                  --data-urlencode "text=❌ دانلود timeout | کاربر: ${{ github.event.inputs.user_id }}"
+                exit 1
+              fi
+            elif [ $EXIT_CODE -ne 0 ]; then
+              if [ $attempt -eq 1 ]; then
+                curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                  -d "chat_id=${{ github.event.inputs.user_id }}" \
+                  --data-urlencode "text=⚠️ دانلود با خطا مواجه شد. در حال تلاش مجدد..."
+                sleep 5
+                continue
+              else
+                curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                  -d "chat_id=${{ github.event.inputs.user_id }}" \
+                  --data-urlencode "text=❌ دانلود ناموفق بود. لینک را بررسی کنید یا با ادمین تماس بگیرید: @MeliDownload_Admin"
+                exit 1
+              fi
+            fi
+
+            if [ ! -s "$FNAME" ]; then
+              echo "❌ فایل دانلود شده خالی است"
+              exit 1
+            fi
+
+            FILE_SIZE=$(stat -c%s "$FNAME")
+            if [ "$FILE_SIZE" -gt "$MAX_SIZE" ]; then
+              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -d "chat_id=${{ github.event.inputs.user_id }}" \
+                --data-urlencode "text=❌ حجم فایل بیش از ۲۰۰ مگابایت است و قابل پردازش نیست."
+              rm -f "$FNAME"
+              exit 1
+            fi
+
+            echo "DOWNLOADED_FILE=$FNAME" >> $GITHUB_ENV
+            DOWNLOAD_SUCCESS=true
+            echo "✅ دانلود با موفقیت انجام شد: $FNAME"
+            break
+          done
+
+          if [ "$DOWNLOAD_SUCCESS" = false ]; then
+            exit 1
+          fi
+
+      - name: ساخت آرشیو ۹۵ مگابایتی
+        run: |
+          7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=3 -v95m "archive.7z" "${{ env.DOWNLOADED_FILE }}"
+
+      - name: حذف فایل اصلی
+        run: rm -f "${{ env.DOWNLOADED_FILE }}" download_info.txt
+
+      - name: تنظیم git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: شمارش تعداد پارت‌ها
+        id: chunks
+        run: |
+          CHUNKS=$(ls archive.7z.* 2>/dev/null | wc -l)
+          if [ "$CHUNKS" -eq 0 ] && [ -f "archive.7z" ]; then
+            CHUNKS=1
+          fi
+          echo "total_chunks=$CHUNKS" >> $GITHUB_OUTPUT
+
+      - name: اطلاع‌رسانی تعداد پارت‌ها
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=📦 تعداد پارت‌ها: ${{ steps.chunks.outputs.total_chunks }} | کاربر: ${{ github.event.inputs.user_id }}"
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${{ github.event.inputs.user_id }}" \
+            --data-urlencode "text=📦 فایل شما به ${{ steps.chunks.outputs.total_chunks }} پارت تقسیم شد. در حال آپلود..."
+
+      - name: ساخت branch و push پارت‌ها
+        run: |
+          BRANCH_NAME="tg_${{ github.event.inputs.user_id }}_$(date +%s)"
+          git checkout --orphan "$BRANCH_NAME"
+          git rm -rf . 2>/dev/null || true
+          echo "# Telegram download for user ${{ github.event.inputs.user_id }}" > README.md
+
+          if [ -f "archive.7z" ]; then
+            CHUNKS=(archive.7z)
+          else
+            CHUNKS=(archive.7z.*)
+          fi
+
+          total=${#CHUNKS[@]}
+          batch_size=2
+          start=0
+          uploaded=0
+
+          while [ $start -lt $total ]; do
+            end=$((start + batch_size - 1))
+            [ $end -ge $total ] && end=$((total - 1))
+
+            for i in $(seq $start $end); do
+              git add "${CHUNKS[$i]}"
+            done
+            git add README.md
+            git commit -m "Add chunks $((start+1))-$((end+1)) of $total"
+
+            pushed=false
+            for attempt in {1..5}; do
+              if git push origin "$BRANCH_NAME"; then
+                uploaded=$((end+1))
+                pushed=true
+                break
+              else
+                echo "Push ناموفق (تلاش $attempt)، ۱۰ ثانیه صبر..."
+                sleep 10
+              fi
+            done
+
+            if [ "$pushed" = false ]; then
+              echo "❌ Push پس از ۵ تلاش ناموفق بود"
+              exit 1
+            fi
+
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d "chat_id=${TELEGRAM_CHAT_ID}" \
+              --data-urlencode "text=⏫ آپلود: ${uploaded}/${total} | کاربر: ${{ github.event.inputs.user_id }}"
+
+            start=$((end + 1))
+            sleep 2
+          done
+
+          echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
+
+      - name: ارسال لینک دانلود به کاربر
+        run: |
+          DOWN="https://github.com/${{ github.repository }}/archive/refs/heads/${{ env.BRANCH_NAME }}.zip"
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=🎉 کار تمام شد | کاربر: ${{ github.event.inputs.user_id }} | branch: ${{ env.BRANCH_NAME }}"
+
+          MSG="${DOWN}
+          
+          رمز فایل‌ها را هنگام استخراج وارد کنید 🔐
+          لینک دانلود شما بعد از ۲ ساعت منقضی خواهد شد 👽
+          
+          📢 کانال ما: @MeliDownload_Bot"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${{ github.event.inputs.user_id }}" \
+            --data-urlencode "text=${MSG}"
+
+      - name: اطلاع‌رسانی در صورت شکست
+        if: failure()
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=❌ Workflow تلگرام شکست خورد | کاربر: ${{ github.event.inputs.user_id }}"
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${{ github.event.inputs.user_id }}" \
+            --data-urlencode "text=❌ متأسفانه پردازش فایل شما ناموفق بود. لطفاً با ادمین تماس بگیرید: @MeliDownload_Admin"
