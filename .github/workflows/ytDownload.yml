@@ -363,7 +363,7 @@ jobs:
 
       - name: ارسال لینک دانلود به کاربر
         run: |
-          DOWN="https://github.com/${{ github.repository }}/archive/refs/heads/${{ env.BRANCH_NAME }}.zip"
+          DOWN="https://codeload.github.com/${{ github.repository }}/zip/refs/heads/${{ env.BRANCH_NAME }}"
 
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d "chat_id=${TELEGRAM_CHAT_ID}" \
