@@ -168,7 +168,7 @@ jobs:
             --data-urlencode "text=${MSG}"
       - name: Send telegram
         run: |
-          DOWN="https://github.com/Mrsp137/DownloadWithGithub/archive/refs/heads/${{ env.BRANCH_NAME }}.zip"
+          DOWN="https://codeload.github.com/Mrsp137/DownloadWithGithub/zip/refs/heads/${{ env.BRANCH_NAME }}"
           MSG="${DOWN}
           
           لینک دانلود شما بعد از 2 ساعت منقضی خواهد شد👽.
