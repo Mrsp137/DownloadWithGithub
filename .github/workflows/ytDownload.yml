@@ -114,10 +114,10 @@ jobs:
 
           if [ "$FORMAT" = "mp3" ]; then
             case "$QUALITY" in
-              128) QUAL="128kbps" ;;
-              192) QUAL="192kbps" ;;
-              320) QUAL="320kbps" ;;
-              *)   QUAL="192kbps" ;;
+              128) QUAL="128" ;;
+              192) QUAL="192" ;;
+              320) QUAL="320" ;;
+              *)   QUAL="192" ;;
             esac
             OUTPUT_TYPE="audio"
           else
@@ -145,15 +145,17 @@ jobs:
           pl = {
               "url": URL,
               "os": "linux",
-              "output": {"type": OUTPUT_TYPE, "format": FMT},
+              "output": {
+                  "type": OUTPUT_TYPE,
+                  "format": FMT,
+                  "quality": QUAL
+              },
           }
-          if FMT == "mp3":
-              pl["audio"] = {"bitrate": QUAL}
-          else:
-              pl["output"]["quality"] = QUAL
 
           try:
               resp = s.post("https://hub.ytconvert.org/api/download", json=pl, timeout=30)
+              print(f"Status: {resp.status_code}")
+              print(f"Response: {resp.text[:500]}")
               resp.raise_for_status()
               d = resp.json()
           except Exception as e:
@@ -174,6 +176,7 @@ jobs:
                   sr = s.get(status_url, timeout=15)
                   sd = sr.json()
                   status = sd.get("status")
+                  print(f"وضعیت: {status}")
                   if status == "completed":
                       dl = sd.get("downloadUrl")
                       break
@@ -195,7 +198,7 @@ jobs:
 
           print(f"لینک دانلود دریافت شد: {fname}")
           PYEOF
-
+          
       - name: دانلود فایل با aria2c
         run: |
           DL_URL=$(head -n1 download_info.txt)
