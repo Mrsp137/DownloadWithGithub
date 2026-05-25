@@ -16,7 +16,7 @@ jobs:
       - name: Delete branches older than 3 hours
         run: |
           NOW=$(date +%s)
-          THREE_HOURS_AGO=$((NOW - 4800))
+          THREE_HOURS_AGO=$((NOW - 2400))
           git branch -r | grep -E 'origin/(user_|yt_)' | while read branch; do
             timestamp=$(echo "$branch" | grep -oP '(user|yt)_.*_\K\d+')
             if [ -n "$timestamp" ]; then
